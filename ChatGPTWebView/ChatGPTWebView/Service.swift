@@ -10,8 +10,6 @@ enum Service: CaseIterable {
     // 底部导航栏顺序
     case chatgpt
     case aistudio
-    // case claude
-    // case grok
 
     var homeURL: URL {
         switch self {
@@ -19,10 +17,6 @@ enum Service: CaseIterable {
             return URL(string: "https://chatgpt.com/")!
         case .aistudio:
             return URL(string: "https://aistudio.google.com/prompts/new_chat")!
-        // case .claude:
-        //     return URL(string: "https://claude.ai/")!
-        // case .grok:
-        //     return URL(string: "https://grok.com/")!
         }
     }
 
@@ -32,10 +26,6 @@ enum Service: CaseIterable {
             return "ChatGPT"
         case .aistudio:
             return "AIStudio"
-        // case .claude:
-        //     return "Claude"
-        // case .grok:
-        //     return "Grok"
         }
     }
 
@@ -45,20 +35,16 @@ enum Service: CaseIterable {
             return "globe"
         case .aistudio:
             return "sparkles"
-        // case .claude:
-        //     return "pencil"
-        // case .grok:
-        //     return "bolt.horizontal.circle"
         }
     }
 
     var userAgentOverride: String? {
         switch self {
-        case .chatgpt, .aistudio: 
+        case .chatgpt:
             return "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
-        // case .aistudio, .claude: 
-            // 只有 AI Studio claude 老老实实当手机
-            // return nil
+        case .aistudio:
+            // AIStudio 使用手机 UA，确保移动端正常渲染
+            return nil
         }
     }
 
@@ -95,20 +81,7 @@ enum Service: CaseIterable {
                 }, 3000);
                 """
             )
-        // case .grok:
-        //     //  Grok 缩放代码，强行压缩回手机大小
-        //     return InjectedJavaScript(
-        //         documentStart: nil,
-        //         documentEnd: """
-        //         var meta = document.createElement('meta');
-        //         meta.name = 'viewport';
-        //         meta.content = 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no';
-        //         document.head.appendChild(meta);
-        //         """,
-        //         didFinish: nil
-        //     )
         case .aistudio:
-            // AI Studio claude 不需要特殊处理
             return nil
         }
     }
@@ -119,10 +92,6 @@ enum Service: CaseIterable {
             return "zoomScale.chatgpt"
         case .aistudio:
             return "zoomScale.aistudio"
-        // case .claude:
-        //     return "zoomScale.claude"
-        // case .grok:
-        //     return "zoomScale.grok"
         }
     }
 
@@ -132,10 +101,6 @@ enum Service: CaseIterable {
             return "chatgpt.com"
         case .aistudio:
             return "aistudio.google.com"
-        // case .claude:
-        //     return "claude.ai"
-        // case .grok:
-        //     return "grok.com"
         }
     }
 }
