@@ -1,8 +1,8 @@
 name: Build Unsigned IPA
 
-on:
+于:
   push:
-    branches: [ "main" ]
+    分支: [ "main" ]
   workflow_dispatch:
 
 jobs:
@@ -75,7 +75,7 @@ jobs:
           rm -rf "$OUT_DIR/Payload/"*.app/_CodeSignature || true
           rm -f "$OUT_DIR/Payload/"*.app/embedded.mobileprovision || true
 
-          (cd "$OUT_DIR" && /usr/bin/zip -qry "ChatGPTWebView-unsigned.ipa" Payload)
+          (cd "$OUT_DIR" && /usr/bin/zip -qry "ChatGPT.ipa" Payload)
 
           ls -la "$OUT_DIR"
 
@@ -83,5 +83,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: unsigned-ipa
-          path: ${{ runner.temp }}/out/ChatGPTWebView-unsigned.ipa
+          path: ${{ runner.temp }}/out/ChatGPT.ipa
           if-no-files-found: error
