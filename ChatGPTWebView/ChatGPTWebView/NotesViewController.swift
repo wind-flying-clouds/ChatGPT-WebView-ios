@@ -5,11 +5,22 @@ final class NotesViewController: UIViewController, UITextViewDelegate {
     private var autosaveTimer: Timer?
     private let notesDefaultsKey = "notes.text"
 
+    // ✅ 修复：在 init 里设置 tabBarItem，不依赖懒加载的 viewDidLoad
+    init() {
+        super.init(nibName: nil, bundle: nil)
+        tabBarItem = UITabBarItem(title: "Notes", image: UIImage(systemName: "note.text"), tag: 0)
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        tabBarItem = UITabBarItem(title: "Notes", image: UIImage(systemName: "note.text"), tag: 0)
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         title = "Notes"
         view.backgroundColor = .systemBackground
-        tabBarItem = UITabBarItem(title: "Notes", image: UIImage(systemName: "note.text"), tag: 0)
+        // tabBarItem 已在 init 里设置，这里不再重复设置
         navigationItem.rightBarButtonItems = [
             UIBarButtonItem(title: "Send To…", style: .plain, target: self, action: #selector(showSendToMenu)),
             UIBarButtonItem(title: "Share", style: .plain, target: self, action: #selector(shareNotes)),
@@ -188,4 +199,4 @@ private final class PaddingLabel: UILabel {
         return CGSize(width: size.width + textInsets.left + textInsets.right,
                       height: size.height + textInsets.top + textInsets.bottom)
     }
-}
+}   
