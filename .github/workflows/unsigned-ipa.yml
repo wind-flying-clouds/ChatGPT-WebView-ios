@@ -25,8 +25,8 @@ jobs:
           .venv/bin/python -m pip install --upgrade pip --break-system-packages
           .venv/bin/python -m pip install pillow --break-system-packages
 
-      - name: Generate placeholder app icons
-        run: .venv/bin/python scripts/generate_app_icons.py
+#      - name: Generate placeholder app icons
+#        run: .venv/bin/python scripts/generate_app_icons.py
 
       - name: Cache derived data
         uses: actions/cache@v4
