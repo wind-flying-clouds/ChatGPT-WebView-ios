@@ -8,7 +8,6 @@ struct InjectedJavaScript {
 }
 
 enum Service: CaseIterable {
-    // 底部导航栏顺序
     case chatgpt
     case aistudio
 
@@ -23,29 +22,22 @@ enum Service: CaseIterable {
 
     var title: String {
         switch self {
-        case .chatgpt:
-            return "ChatGPT"
-        case .aistudio:
-            return "AIStudio"
+        case .chatgpt:  return "ChatGPT"
+        case .aistudio: return "AIStudio"
         }
     }
 
     var tabIconSystemName: String {
         switch self {
-        case .chatgpt:
-            return "globe"
-        case .aistudio:
-            return "sparkles"
+        case .chatgpt:  return "globe"
+        case .aistudio: return "sparkles"
         }
     }
 
     var preferredContentMode: WKWebpagePreferences.ContentMode {
         switch self {
-        case .aistudio:
-            // AI Studio 仅有桌面版，强制桌面模式渲染
-            return .desktop
-        case .chatgpt:
-            return .mobile
+        case .aistudio: return .desktop   // AI Studio 仅有桌面版
+        case .chatgpt:  return .mobile
         }
     }
 
@@ -54,7 +46,6 @@ enum Service: CaseIterable {
         case .chatgpt:
             return "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
         case .aistudio:
-            // AIStudio 使用手机 UA，确保移动端正常渲染
             return nil
         }
     }
@@ -66,34 +57,41 @@ enum Service: CaseIterable {
                 documentStart: """
                 try {
                   localStorage.setItem('sidebar-expanded-state', 'false');
-                  console.log('💥 Injected: sidebar-expanded-state set to false BEFORE hydration');
-                } catch (e) {
-                  console.log('⚠️ Failed to set sidebar state early:', e);
-                }
+                } catch (_) {}
                 """,
+                // [Fix-5] 移除 debug console.log，生产代码不应写控制台日志
+                // [Fix-6] documentEnd 注入 viewport meta
                 documentEnd: """
-                var meta = document.createElement('meta');
-                meta.name = 'viewport';
-                meta.content = 'width=device-width, initial-scale=1.0';
-                document.head.appendChild(meta);
-                """,
-                didFinish: """
-                setTimeout(() => {
-                  try {
-                    const voiceBtn = document.querySelector('[aria-label="Hold to speak"]');
-                    const micBtn = document.querySelector('[aria-label="Start voice input"]');
-                    if (voiceBtn && micBtn) {
-                      voiceBtn.addEventListener('mousedown', () => micBtn.click());
-                      console.log('🎤 Hold-to-speak rebound to mic');
-                    }
-                  } catch (e) {
-                    console.log('❌ Mic bind failed:', e);
+                (function() {
+                  var existing = document.querySelector('meta[name="viewport"]');
+                  if (!existing) {
+                    var meta = document.createElement('meta');
+                    meta.name = 'viewport';
+                    meta.content = 'width=device-width, initial-scale=1.0';
+                    document.head.appendChild(meta);
                   }
-                }, 3000);
+                })();
+                """,
+                // [Fix-7] 防止多次导航时 setTimeout 回调叠加
+                // 原版每次 didFinish 都注册一个 3s 定时器，快速翻页时会有 N 个并发回调
+                // 改用 window.__micBindDone 标志位，确保只绑定一次
+                didFinish: """
+                (function() {
+                  if (window.__micBindDone) return;
+                  window.__micBindDone = true;
+                  setTimeout(function() {
+                    try {
+                      var voiceBtn = document.querySelector('[aria-label="Hold to speak"]');
+                      var micBtn   = document.querySelector('[aria-label="Start voice input"]');
+                      if (voiceBtn && micBtn) {
+                        voiceBtn.addEventListener('mousedown', function() { micBtn.click(); });
+                      }
+                    } catch (_) {}
+                  }, 3000);
+                })();
                 """
             )
         case .aistudio:
-            // AI Studio 桌面版：注入 viewport 让页面缩放适配手机屏幕宽度
             return InjectedJavaScript(
                 documentStart: nil,
                 documentEnd: """
@@ -113,19 +111,23 @@ enum Service: CaseIterable {
 
     var zoomDefaultsKey: String {
         switch self {
-        case .chatgpt:
-            return "zoomScale.chatgpt"
-        case .aistudio:
-            return "zoomScale.aistudio"
+        case .chatgpt:  return "zoomScale.chatgpt"
+        case .aistudio: return "zoomScale.aistudio"
+        }
+    }
+
+    /// [Fix-8] 新增：lastKnownURL 持久化 key（重启后恢复上次页面）
+    var lastURLDefaultsKey: String {
+        switch self {
+        case .chatgpt:  return "lastURL.chatgpt"
+        case .aistudio: return "lastURL.aistudio"
         }
     }
 
     var websiteDataDomain: String {
         switch self {
-        case .chatgpt:
-            return "chatgpt.com"
-        case .aistudio:
-            return "aistudio.google.com"
+        case .chatgpt:  return "chatgpt.com"
+        case .aistudio: return "aistudio.google.com"
         }
     }
 }
