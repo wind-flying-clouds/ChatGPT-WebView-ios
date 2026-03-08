@@ -58,7 +58,7 @@ Carthage/Build/
 
 fastlane/report.xml
 fastlane/Preview.html
-fastlane/screenshots/**/*.png
+# fastlane/screenshots/**/*.png
 fastlane/test_output
 
 # Generated app icons (created in CI to avoid tracking binaries)
