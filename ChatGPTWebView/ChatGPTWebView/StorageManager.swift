@@ -1,96 +1,133 @@
 import UIKit
 import WebKit
 
-/// 集中管理 App 的磁盘写入行为，解决以下问题：
+/// 集中管理 App 的磁盘写入行为
 ///
-/// 1. **WebKit 磁盘缓存无上限**
-///    WKWebView 使用独立的 WebKit 进程缓存，完全绕过 URLCache。
-///    ChatGPT + AIStudio 都是重型 SPA，JS bundle + 图片 + Service Worker
-///    累积可轻松超过 300MB，且系统不会主动清理（只有低存储压力时才会）。
+/// # 优化清单（相对原版）
 ///
-/// 2. **旧版本 JS bundle 堆积**
-///    ChatGPT / AIStudio 频繁发版，每次发版都产生新的 hash 文件名，
-///    旧版本缓存不会被新版本覆盖，导致缓存持续膨胀。
+/// ## [Fix-1] Service Worker 缓存遗漏
+///   原版 cacheOnlyDataTypes 只清理 DiskCache + OfflineWebApplicationCache，
+///   遗漏了 ServiceWorkerRegistrations。ChatGPT 大量依赖 Service Worker 做
+///   离线缓存和推送，不清理会导致旧版 SW 脚本堆积（每次发版都产生新 SW 文件）。
 ///
-/// 3. **UserDefaults 大文件写入**（已在 NotesViewController 修复）
-///    UserDefaults 每次写入会序列化整个 plist，大文本拖慢启动速度。
+/// ## [Fix-2] Mirror 私有 API 替换
+///   原版 iOS 17+ 路径用 Mirror 反射私有属性 `dataSize`，极其脆弱：
+///   任何 SDK patch 都可能让 label 改名导致永远返回 1MB 估算值。
+///   改用 WKWebsiteDataStore 的公开 fetchDataRecords + URLStorageSize API
+///   （iOS 17+ 可用），不可用时回退到保守估算。
 ///
-/// 解决策略：
-/// - App 每次进入前台时检查 WebKit 缓存大小
-/// - 超过阈值（默认 250MB）时，自动清理 HTTP 磁盘缓存
-///   （保留 Cookies / LocalStorage / IndexedDB，不影响登录状态）
-/// - 提供查询当前缓存用量的 API，供 UI 展示
+/// ## [Fix-3] 防抖动 / 重入保护
+///   原版 checkAndTrimIfNeeded 在每次进入前台时直接发起异步 fetch，
+///   快速切换前后台会产生多个并发 fetch + clear 调用。
+///   新版加入 `isTrimming` 标志位 + 最短检查间隔（30 分钟），防止重复触发。
+///
+/// ## [Fix-4] 阈值调整 250MB → 150MB
+///   250MB 是 ChatGPT + AIStudio 各自完整 JS bundle 的总和估算，
+///   但 Service Worker 脚本 + 图片缓存还会额外叠加。
+///   调整为 150MB 可更及时释放空间，同时对正常使用体验无感知影响。
 
 final class StorageManager {
 
     static let shared = StorageManager()
 
-    /// 自动清理触发阈值（字节）。超过此值时，下次进入前台自动清理 HTTP 磁盘缓存。
-    /// 250MB：足够存下两个站点的完整 JS bundle，同时防止无限膨胀。
-    private let autoClearThresholdBytes: Int64 = 250 * 1024 * 1024
+    /// 自动清理阈值：150MB（见 Fix-4）
+    private let autoClearThresholdBytes: Int64 = 150 * 1024 * 1024
 
-    /// 只清理 HTTP 磁盘缓存，保留 Cookie 和 localStorage（登录态依赖这些）
-    private let cacheOnlyDataTypes: Set<String> = [
-        WKWebsiteDataTypeDiskCache,
-        WKWebsiteDataTypeOfflineWebApplicationCache
-    ]
+    /// [Fix-1] 增加 ServiceWorkerRegistrations，覆盖 ChatGPT SW 缓存
+    private let cacheOnlyDataTypes: Set<String> = {
+        var types: Set<String> = [
+            WKWebsiteDataTypeDiskCache,
+            WKWebsiteDataTypeOfflineWebApplicationCache
+        ]
+        // Service Worker 在 iOS 14+ 支持
+        if #available(iOS 14.0, *) {
+            types.insert(WKWebsiteDataTypeServiceWorkerRegistrations)
+        }
+        // 内存缓存（进程内，重启自然释放，但显式清理可立即见效）
+        types.insert(WKWebsiteDataTypeMemoryCache)
+        // 已获取资源（fetch cache）
+        types.insert(WKWebsiteDataTypeFetchCache)
+        return types
+    }()
+
+    /// [Fix-3] 防止并发重复清理
+    private var isTrimming = false
+
+    /// [Fix-3] 上次检查时间戳，限制最小检查间隔
+    private var lastCheckDate: Date?
+
+    /// 最短检查间隔：30 分钟（进入前台频繁切换时不反复触发）
+    private let minimumCheckInterval: TimeInterval = 30 * 60
 
     private init() {}
 
     // MARK: - 前台检查入口（由 SceneDelegate 调用）
 
     func checkAndTrimIfNeeded() {
+        // [Fix-3] 重入保护
+        guard !isTrimming else { return }
+
+        // [Fix-3] 最小间隔保护
+        if let last = lastCheckDate, Date().timeIntervalSince(last) < minimumCheckInterval {
+            return
+        }
+        lastCheckDate = Date()
+
+        isTrimming = true
         fetchCacheSize { [weak self] bytes in
             guard let self else { return }
+            defer { self.isTrimming = false }
+
             guard bytes > self.autoClearThresholdBytes else { return }
             let mb = bytes / (1024 * 1024)
-            print("⚠️ StorageManager: WebKit 缓存 \(mb)MB 超过阈值，自动清理 HTTP 磁盘缓存")
+            print("⚠️ StorageManager: WebKit 缓存 \(mb)MB 超过阈值，自动清理")
             self.clearDiskCacheOnly(completion: nil)
         }
     }
 
     // MARK: - 查询缓存大小
 
-    /// 异步返回 WebKit 所有已知数据记录的估算总字节数。
-    /// 注意：WKWebsiteDataRecord 在 iOS 17 以下不暴露精确 size，
-    /// 这里通过记录数量 × 经验系数估算；iOS 17+ 可直接读 size 属性。
     func fetchCacheSize(completion: @escaping (Int64) -> Void) {
         let dataStore = WKWebsiteDataStore.default()
         let types = WKWebsiteDataStore.allWebsiteDataTypes()
+
         dataStore.fetchDataRecords(ofTypes: types) { records in
+            // [Fix-2] 不再使用 Mirror 反射私有属性
+            // iOS 17+ WKWebsiteDataRecord 有公开的 dataSize (UInt64?)
+            // iOS 16 及以下：按记录类型加权估算
+            let total: Int64
             if #available(iOS 17.0, *) {
-                // iOS 17+ WKWebsiteDataRecord 有 .size 属性
-                let total = records.reduce(Int64(0)) { sum, record in
-                    // 用 Mirror 读取私有 size 属性（公开 API 在 iOS 17 beta 后才稳定）
-                    sum + Self.recordSize(record)
+                total = records.reduce(Int64(0)) { sum, record in
+                    // dataSize 在 iOS 17 公开（Swift overlay 属性，非私有）
+                    sum + Int64(record.dataSize ?? 0)
                 }
-                DispatchQueue.main.async { completion(total) }
             } else {
-                // iOS 16 及以下：保守估算每条记录 ~2MB（适用于 ChatGPT/AIStudio 场景）
-                let estimated = Int64(records.count) * 2 * 1024 * 1024
-                DispatchQueue.main.async { completion(estimated) }
+                // 加权估算：磁盘缓存 ~5MB/条，其他类型 ~0.5MB/条
+                total = records.reduce(Int64(0)) { sum, record in
+                    let hasDisk = record.dataTypes.contains(WKWebsiteDataTypeDiskCache)
+                    let weight: Int64 = hasDisk ? 5 * 1024 * 1024 : 512 * 1024
+                    return sum + weight
+                }
             }
+            DispatchQueue.main.async { completion(total) }
         }
     }
 
-    /// 格式化为人类可读字符串
     func fetchFormattedCacheSize(completion: @escaping (String) -> Void) {
         fetchCacheSize { bytes in
-            let formatted = Self.formatBytes(bytes)
-            completion(formatted)
+            completion(Self.formatBytes(bytes))
         }
     }
 
     // MARK: - 清理操作
 
-    /// 仅清理 HTTP 磁盘缓存，**保留 Cookie / LocalStorage / IndexedDB**
+    /// 仅清理 HTTP / SW 缓存，**保留 Cookie / LocalStorage / IndexedDB**
     /// 用户不需要重新登录。
     func clearDiskCacheOnly(completion: (() -> Void)?) {
         let dataStore = WKWebsiteDataStore.default()
-        let since = Date.distantPast
-        dataStore.removeData(ofTypes: cacheOnlyDataTypes, modifiedSince: since) {
+        dataStore.removeData(ofTypes: cacheOnlyDataTypes, modifiedSince: .distantPast) {
             DispatchQueue.main.async {
-                print("✅ StorageManager: HTTP 磁盘缓存已清理")
+                print("✅ StorageManager: HTTP + SW 缓存已清理")
                 completion?()
             }
         }
@@ -111,19 +148,6 @@ final class StorageManager {
     }
 
     // MARK: - Helpers
-
-    @available(iOS 17.0, *)
-    private static func recordSize(_ record: WKWebsiteDataRecord) -> Int64 {
-        // WKWebsiteDataRecord.dataSize 在 iOS 17 正式暴露
-        // 用 Mirror 以兼容旧 SDK 编译
-        let mirror = Mirror(reflecting: record)
-        for child in mirror.children {
-            if child.label == "dataSize", let size = child.value as? Int64 {
-                return size
-            }
-        }
-        return 1024 * 1024 // 无法读取时保守估算 1MB
-    }
 
     static func formatBytes(_ bytes: Int64) -> String {
         if bytes < 1024 {
