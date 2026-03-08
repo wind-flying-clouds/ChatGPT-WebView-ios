@@ -107,9 +107,9 @@ enum Service: CaseIterable {
         //         """,
         //         didFinish: nil
         //     )
-        // case .aistudio, .claude:
-        //     // AI Studio claude 不需要特殊处理
-        //     return nil
+        case .aistudio:
+            // AI Studio claude 不需要特殊处理
+            return nil
         }
     }
 
