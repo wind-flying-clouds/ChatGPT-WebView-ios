@@ -54,11 +54,10 @@ enum Service: CaseIterable {
 
     var userAgentOverride: String? {
         switch self {
-        case .chatgpt, .grok, .claude: 
-            // ✨ 变化 1：把 Claude 也拉进“伪装 Mac 电脑”的阵营，彻底屏蔽它的下载 App 弹窗！
+        case .chatgpt, .grok: 
             return "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
-        case .aistudio: 
-            // 只有 AI Studio 老老实实当手机
+        case .aistudio, .claude: 
+            // 只有 AI Studio claude 老老实实当手机
             return nil
         }
     }
@@ -96,8 +95,8 @@ enum Service: CaseIterable {
                 }, 3000);
                 """
             )
-        case .grok, .claude:
-            // ✨ 变化 2：因为 Claude 现在是电脑版网页了，所以和 Grok 共用这段缩放代码，强行压缩回手机大小
+        case .grok:
+            //  Grok 缩放代码，强行压缩回手机大小
             return InjectedJavaScript(
                 documentStart: nil,
                 documentEnd: """
@@ -108,8 +107,8 @@ enum Service: CaseIterable {
                 """,
                 didFinish: nil
             )
-        case .aistudio:
-            // AI Studio 不需要特殊处理
+        case .aistudio, .claude:
+            // AI Studio claude 不需要特殊处理
             return nil
         }
     }
