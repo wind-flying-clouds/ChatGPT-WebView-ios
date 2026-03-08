@@ -7,16 +7,20 @@ struct InjectedJavaScript {
 }
 
 enum Service: CaseIterable {
+    // 底部导航栏顺序
     case chatgpt
-    case gemini
+    case aistudio
+    case claude
     case grok
 
     var homeURL: URL {
         switch self {
         case .chatgpt:
             return URL(string: "https://chatgpt.com/")!
-        case .gemini:
-            return URL(string: "https://gemini.google.com/")!
+        case .aistudio:
+            return URL(string: "https://aistudio.google.com/prompts/new_chat")!
+        case .claude:
+            return URL(string: "https://claude.ai/new")!
         case .grok:
             return URL(string: "https://grok.com/")!
         }
@@ -26,8 +30,10 @@ enum Service: CaseIterable {
         switch self {
         case .chatgpt:
             return "ChatGPT"
-        case .gemini:
-            return "Gemini"
+        case .aistudio:
+            return "AIStudio"
+        case .claude:
+            return "Claude"
         case .grok:
             return "Grok"
         }
@@ -36,19 +42,23 @@ enum Service: CaseIterable {
     var tabIconSystemName: String {
         switch self {
         case .chatgpt:
+            return "brain"
+        case .aistudio:
             return "sparkles"
-        case .gemini:
-            return "globe"
+        case .claude:
+            return "quill"
         case .grok:
-            return "bolt.horizontal.circle"
+            return "bolt.fill"
         }
     }
 
     var userAgentOverride: String? {
         switch self {
-        case .chatgpt:
+        case .chatgpt, .grok, .claude: 
+            // ✨ 变化 1：把 Claude 也拉进“伪装 Mac 电脑”的阵营，彻底屏蔽它的下载 App 弹窗！
             return "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
-        case .gemini, .grok:
+        case .aistudio: 
+            // 只有 AI Studio 老老实实当手机
             return nil
         }
     }
@@ -86,7 +96,20 @@ enum Service: CaseIterable {
                 }, 3000);
                 """
             )
-        case .gemini, .grok:
+        case .grok, .claude:
+            // ✨ 变化 2：因为 Claude 现在是电脑版网页了，所以和 Grok 共用这段缩放代码，强行压缩回手机大小
+            return InjectedJavaScript(
+                documentStart: nil,
+                documentEnd: """
+                var meta = document.createElement('meta');
+                meta.name = 'viewport';
+                meta.content = 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no';
+                document.head.appendChild(meta);
+                """,
+                didFinish: nil
+            )
+        case .aistudio:
+            // AI Studio 不需要特殊处理
             return nil
         }
     }
@@ -95,8 +118,10 @@ enum Service: CaseIterable {
         switch self {
         case .chatgpt:
             return "zoomScale.chatgpt"
-        case .gemini:
-            return "zoomScale.gemini"
+        case .aistudio:
+            return "zoomScale.aistudio"
+        case .claude:
+            return "zoomScale.claude"
         case .grok:
             return "zoomScale.grok"
         }
@@ -106,8 +131,10 @@ enum Service: CaseIterable {
         switch self {
         case .chatgpt:
             return "chatgpt.com"
-        case .gemini:
-            return "gemini.google.com"
+        case .aistudio:
+            return "aistudio.google.com"
+        case .claude:
+            return "claude.ai"
         case .grok:
             return "grok.com"
         }
