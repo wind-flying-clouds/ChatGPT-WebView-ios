@@ -9,5 +9,6 @@ final class MainTabBarController: UITabBarController {
         }
         let notesController = UINavigationController(rootViewController: NotesViewController())
         viewControllers = webControllers + [notesController]
+        tabBar.itemPositioning = .fill
     }
 }
