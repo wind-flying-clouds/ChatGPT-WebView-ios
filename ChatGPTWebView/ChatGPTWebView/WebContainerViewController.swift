@@ -9,6 +9,24 @@ final class WebContainerViewController: UIViewController, WKNavigationDelegate, 
     private let service: Service
     private var lastKnownURL: URL?
     private var memoryWarningObserver: NSObjectProtocol?
+
+    // 内存缓存 zoom，避免高频读 UserDefaults
+    private var _cachedZoomScale: Double?
+    private var cachedZoomScale: Double {
+        get {
+            if let cached = _cachedZoomScale { return cached }
+            let value = (UserDefaults.standard.object(forKey: service.zoomDefaultsKey) as? Double)
+                .map { clampZoomScale($0) } ?? 1.0
+            _cachedZoomScale = value
+            return value
+        }
+        set {
+            let clamped = clampZoomScale(newValue)
+            _cachedZoomScale = clamped
+            UserDefaults.standard.set(clamped, forKey: service.zoomDefaultsKey)
+        }
+    }
+
     private lazy var menuBarButtonItem = UIBarButtonItem(
         title: "⋯",
         style: .plain,
@@ -55,11 +73,6 @@ final class WebContainerViewController: UIViewController, WKNavigationDelegate, 
         }
     }
 
-    override func viewWillAppear(_ animated: Bool) {
-        super.viewWillAppear(animated)
-        recreateWebViewIfNeeded()
-    }
-
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         handleSelection()
@@ -87,10 +100,15 @@ final class WebContainerViewController: UIViewController, WKNavigationDelegate, 
         activityIndicator.stopAnimating()
     }
 
+    // Auto Layout 固定 activityIndicator，修复横屏后指示器偏移
     private func configureActivityIndicator() {
-        activityIndicator.center = view.center
+        activityIndicator.translatesAutoresizingMaskIntoConstraints = false
         activityIndicator.hidesWhenStopped = true
         view.addSubview(activityIndicator)
+        NSLayoutConstraint.activate([
+            activityIndicator.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            activityIndicator.centerYAnchor.constraint(equalTo: view.centerYAnchor)
+        ])
     }
 
     private func configureNavigationItems() {
@@ -101,7 +119,7 @@ final class WebContainerViewController: UIViewController, WKNavigationDelegate, 
             action: #selector(openInSafari)
         )
         navigationItem.rightBarButtonItems = [menuBarButtonItem, safariButton, zoomBarButtonItem]
-        updateZoomButtonTitle(scale: storedZoomScale)
+        updateZoomButtonTitle(scale: cachedZoomScale)
     }
 
     private func recreateWebViewIfNeeded() {
@@ -121,7 +139,6 @@ final class WebContainerViewController: UIViewController, WKNavigationDelegate, 
         newWebView.backgroundColor = .systemBackground
         newWebView.isOpaque = false
         newWebView.scrollView.contentInsetAdjustmentBehavior = .automatic
-        // 桌面模式（如 AIStudio）开启手势缩放，方便用户查看细节
         if service.preferredContentMode == .desktop {
             newWebView.scrollView.minimumZoomScale = 0.1
             newWebView.scrollView.maximumZoomScale = 5.0
@@ -141,10 +158,8 @@ final class WebContainerViewController: UIViewController, WKNavigationDelegate, 
     private func makeConfiguration() -> WKWebViewConfiguration {
         let config = WKWebViewConfiguration()
         config.processPool = Self.sharedProcessPool
-        config.websiteDataStore = .default()
         config.allowsInlineMediaPlayback = true
         config.mediaTypesRequiringUserActionForPlayback = []
-        config.suppressesIncrementalRendering = false
 
         let prefs = WKWebpagePreferences()
         prefs.allowsContentJavaScript = true
@@ -163,7 +178,6 @@ final class WebContainerViewController: UIViewController, WKNavigationDelegate, 
             }
         }
         config.userContentController = userContentController
-
         return config
     }
 
@@ -172,16 +186,17 @@ final class WebContainerViewController: UIViewController, WKNavigationDelegate, 
         guard webView.url == nil else { return }
         activityIndicator.startAnimating()
         let destination = lastKnownURL ?? service.homeURL
-        let request = URLRequest(url: destination, cachePolicy: .reloadRevalidatingCacheData, timeoutInterval: 30)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            webView.load(request)
-        }
+        // 有缓存直接用，减少网络等待；Clear Site Data 后会用 .reloadIgnoringLocalCacheData
+        let request = URLRequest(url: destination, cachePolicy: .returnCacheDataElseLoad, timeoutInterval: 30)
+        webView.load(request)
     }
 
     @objc private func openInSafari() {
         let destination = webView?.url ?? service.homeURL
         UIApplication.shared.open(destination, options: [:], completionHandler: nil)
     }
+
+    // MARK: - Action Menu（含存储信息）
 
     @objc private func showActionMenu() {
         let alert = UIAlertController(title: nil, message: nil, preferredStyle: .actionSheet)
@@ -206,8 +221,19 @@ final class WebContainerViewController: UIViewController, WKNavigationDelegate, 
             self?.openInSafari()
         })
 
+        // 存储管理分区
         alert.addAction(UIAlertAction(title: "Clear Site Data", style: .destructive) { [weak self] _ in
             self?.clearSiteData()
+        })
+
+        // 新增：仅清理 HTTP 缓存，不影响登录状态
+        alert.addAction(UIAlertAction(title: "Clear HTTP Cache Only", style: .default) { [weak self] _ in
+            self?.clearHttpCacheOnly()
+        })
+
+        // 新增：查看当前缓存用量
+        alert.addAction(UIAlertAction(title: "Storage Usage…", style: .default) { [weak self] _ in
+            self?.showStorageUsage()
         })
 
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
@@ -215,8 +241,53 @@ final class WebContainerViewController: UIViewController, WKNavigationDelegate, 
         if let popover = alert.popoverPresentationController {
             popover.barButtonItem = menuBarButtonItem
         }
-
         present(alert, animated: true)
+    }
+
+    // MARK: - Storage Actions
+
+    /// 仅清理 HTTP 磁盘缓存，保留 Cookie / LocalStorage，用户无需重新登录
+    private func clearHttpCacheOnly() {
+        activityIndicator.startAnimating()
+        StorageManager.shared.clearDiskCacheOnly { [weak self] in
+            self?.activityIndicator.stopAnimating()
+            // 强制重新加载以验证缓存已清空
+            if let webView = self?.webView {
+                let request = URLRequest(
+                    url: webView.url ?? self!.service.homeURL,
+                    cachePolicy: .reloadIgnoringLocalCacheData,
+                    timeoutInterval: 30
+                )
+                webView.load(request)
+            }
+        }
+    }
+
+    /// 展示当前 WebKit 缓存用量，并提供清理入口
+    private func showStorageUsage() {
+        // 先显示一个"正在查询"的 alert，避免空白等待
+        let loadingAlert = UIAlertController(
+            title: "Storage Usage",
+            message: "Calculating…",
+            preferredStyle: .alert
+        )
+        present(loadingAlert, animated: true)
+
+        StorageManager.shared.fetchFormattedCacheSize { [weak self] formatted in
+            guard let self else { return }
+            loadingAlert.dismiss(animated: false) {
+                let info = UIAlertController(
+                    title: "Storage Usage",
+                    message: "WebKit cache: \(formatted)\n\nThis includes cached pages, scripts, and images for all tabs. Clearing the HTTP cache frees space without logging you out.",
+                    preferredStyle: .alert
+                )
+                info.addAction(UIAlertAction(title: "Clear HTTP Cache", style: .destructive) { [weak self] _ in
+                    self?.clearHttpCacheOnly()
+                })
+                info.addAction(UIAlertAction(title: "OK", style: .default))
+                self.present(info, animated: true)
+            }
+        }
     }
 
     @objc private func showZoomOptions() {
@@ -237,42 +308,30 @@ final class WebContainerViewController: UIViewController, WKNavigationDelegate, 
         if let popover = alert.popoverPresentationController {
             popover.barButtonItem = zoomBarButtonItem
         }
-
         present(alert, animated: true, completion: nil)
     }
 
-    private var storedZoomScale: Double {
-        get {
-            let defaults = UserDefaults.standard
-            let key = service.zoomDefaultsKey
-            if let value = defaults.object(forKey: key) as? Double {
-                return clampZoomScale(value)
-            }
-            return 1.0
-        }
-        set {
-            UserDefaults.standard.set(clampZoomScale(newValue), forKey: service.zoomDefaultsKey)
-        }
-    }
-
     private func clampZoomScale(_ scale: Double) -> Double {
-        return min(max(scale, minZoomScale), maxZoomScale)
+        min(max(scale, minZoomScale), maxZoomScale)
     }
 
     private func adjustZoom(by delta: Double) {
-        setZoom(scale: storedZoomScale + delta)
+        setZoom(scale: cachedZoomScale + delta)
     }
 
     private func setZoom(scale: Double) {
         let clamped = clampZoomScale(scale)
-        storedZoomScale = clamped
+        cachedZoomScale = clamped
         applyZoom(scale: clamped)
         updateZoomButtonTitle(scale: clamped)
     }
 
     private func applyStoredZoomIfNeeded() {
-        applyZoom(scale: storedZoomScale)
-        updateZoomButtonTitle(scale: storedZoomScale)
+        let scale = cachedZoomScale
+        // zoom == 1.0 时跳过 JS 注入，节省每次页面加载的脚本执行开销
+        guard scale != 1.0 else { return }
+        applyZoom(scale: scale)
+        updateZoomButtonTitle(scale: scale)
     }
 
     private func updateZoomButtonTitle(scale: Double) {
@@ -280,17 +339,18 @@ final class WebContainerViewController: UIViewController, WKNavigationDelegate, 
         zoomBarButtonItem.title = "Zoom \(percent)%"
     }
 
+    // 使用标准 CSS transform 替代非标准 zoom 属性
     private func applyZoom(scale: Double) {
         guard let webView else { return }
         let formattedScale = String(format: "%.2f", scale)
         let script = """
         (function() {
           var scale = \(formattedScale);
-          if (document.body) {
-            document.body.style.zoom = scale;
-          }
-          if (document.documentElement) {
-            document.documentElement.style.zoom = scale;
+          var el = document.body || document.documentElement;
+          if (el) {
+            el.style.transform = 'scale(' + scale + ')';
+            el.style.transformOrigin = 'top left';
+            el.style.width = (100 / scale) + '%';
           }
         })();
         """
@@ -298,32 +358,19 @@ final class WebContainerViewController: UIViewController, WKNavigationDelegate, 
     }
 
     private func clearSiteData() {
-        let dataStore = WKWebsiteDataStore.default()
-        let dataTypes = WKWebsiteDataStore.allWebsiteDataTypes()
-        let targetDomain = service.websiteDataDomain.lowercased()
-        dataStore.fetchDataRecords(ofTypes: dataTypes) { [weak self] records in
-            let matchingRecords = records.filter { record in
-                record.displayName.lowercased().contains(targetDomain)
-            }
-            guard !matchingRecords.isEmpty else {
-                DispatchQueue.main.async {
-                    self?.loadServiceHomeURL()
-                }
-                return
-            }
-            dataStore.removeData(ofTypes: dataTypes, for: matchingRecords) {
-                DispatchQueue.main.async {
-                    self?.loadServiceHomeURL()
-                }
-            }
+        StorageManager.shared.clearAllData(for: service.websiteDataDomain) { [weak self] in
+            self?.loadServiceHomeURL()
         }
     }
 
     private func loadServiceHomeURL() {
         guard let webView else { return }
-        let request = URLRequest(url: service.homeURL, cachePolicy: .reloadRevalidatingCacheData, timeoutInterval: 30)
+        // Clear Site Data 后强制从服务器重新加载，不使用本地缓存
+        let request = URLRequest(url: service.homeURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
         webView.load(request)
     }
+
+    // MARK: - WKNavigationDelegate
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         activityIndicator.stopAnimating()
@@ -337,6 +384,14 @@ final class WebContainerViewController: UIViewController, WKNavigationDelegate, 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         activityIndicator.stopAnimating()
         print("❌ Navigation failed: \(error.localizedDescription)")
+    }
+
+    // DNS 错误、超时等在 provisional 阶段触发，原代码 spinner 永不停止
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        activityIndicator.stopAnimating()
+        let nsError = error as NSError
+        guard nsError.code != NSURLErrorCancelled else { return }
+        print("❌ Provisional navigation failed: \(error.localizedDescription)")
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
@@ -355,6 +410,8 @@ final class WebContainerViewController: UIViewController, WKNavigationDelegate, 
         present(alert, animated: true, completion: nil)
     }
 
+    // MARK: - Tab Lifecycle
+
     private func handleSelection() {
         recreateWebViewIfNeeded()
         webView?.isHidden = false
@@ -362,6 +419,7 @@ final class WebContainerViewController: UIViewController, WKNavigationDelegate, 
     }
 
     private func handleDeselection() {
+        lastKnownURL = webView?.url ?? lastKnownURL
         webView?.stopLoading()
         webView?.isHidden = true
         activityIndicator.stopAnimating()
@@ -369,8 +427,20 @@ final class WebContainerViewController: UIViewController, WKNavigationDelegate, 
 
     private func handleMemoryWarning() {
         guard view.window != nil else { return }
-        guard !isSelectedTab else { return }
-        unloadIfNeeded()
+
+        // 非当前 Tab：卸载整个 WebView 释放内存
+        if !isSelectedTab {
+            unloadIfNeeded()
+            return
+        }
+
+        // 当前 Tab 也受内存压力时：清空前进/后退历史，释放页面快照占用的内存
+        // WKWebView 的前进后退列表会在内存中保留每个页面的快照（几MB到几十MB）
+        // 通过重新加载当前页来隐式清空历史列表
+        if let webView, let currentURL = webView.url {
+            let request = URLRequest(url: currentURL, cachePolicy: .returnCacheDataElseLoad, timeoutInterval: 30)
+            webView.load(request)
+        }
     }
 
     private var isSelectedTab: Bool {

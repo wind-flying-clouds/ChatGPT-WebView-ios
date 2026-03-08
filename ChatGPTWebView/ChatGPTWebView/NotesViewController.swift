@@ -3,9 +3,18 @@ import UIKit
 final class NotesViewController: UIViewController, UITextViewDelegate {
     private let textView = UITextView()
     private var autosaveTimer: Timer?
-    private let notesDefaultsKey = "notes.text"
 
-    // ✅ 修复：在 init 里设置 tabBarItem，不依赖懒加载的 viewDidLoad
+    // 优化D：Notes 从 UserDefaults 迁移到文件系统
+    // UserDefaults 设计用于存储少量键值偏好（通常 < 100KB），
+    // 大段笔记写入会导致整个 UserDefaults plist 序列化/反序列化，拖慢启动时间。
+    // 使用 Documents/notes.txt 后，读写是独立 I/O，不影响 App 其他偏好数据。
+    private static let notesFileURL: URL = {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return docs.appendingPathComponent("notes.txt")
+    }()
+
+    private var textViewBottomConstraint: NSLayoutConstraint!
+
     init() {
         super.init(nibName: nil, bundle: nil)
         tabBarItem = UITabBarItem(title: "Notes", image: UIImage(systemName: "note.text"), tag: 0)
@@ -20,13 +29,15 @@ final class NotesViewController: UIViewController, UITextViewDelegate {
         super.viewDidLoad()
         title = "Notes"
         view.backgroundColor = .systemBackground
-        // tabBarItem 已在 init 里设置，这里不再重复设置
+
         navigationItem.rightBarButtonItems = [
             UIBarButtonItem(title: "Send To…", style: .plain, target: self, action: #selector(showSendToMenu)),
             UIBarButtonItem(title: "Share", style: .plain, target: self, action: #selector(shareNotes)),
             UIBarButtonItem(title: "Copy", style: .plain, target: self, action: #selector(copyNotes))
         ]
-        navigationItem.leftBarButtonItem = UIBarButtonItem(title: "Clear", style: .plain, target: self, action: #selector(confirmClear))
+        navigationItem.leftBarButtonItem = UIBarButtonItem(
+            title: "Clear", style: .plain, target: self, action: #selector(confirmClear)
+        )
 
         textView.translatesAutoresizingMaskIntoConstraints = false
         textView.delegate = self
@@ -35,20 +46,109 @@ final class NotesViewController: UIViewController, UITextViewDelegate {
         textView.text = loadNotes()
 
         view.addSubview(textView)
+
+        textViewBottomConstraint = textView.bottomAnchor.constraint(
+            equalTo: view.safeAreaLayoutGuide.bottomAnchor
+        )
         NSLayoutConstraint.activate([
             textView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
             textView.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
             textView.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
-            textView.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor)
+            textViewBottomConstraint
         ])
+
+        // 优化D：若旧数据在 UserDefaults，一次性迁移到文件，然后删除 UserDefaults 条目
+        migrateFromUserDefaultsIfNeeded()
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(keyboardWillChangeFrame(_:)),
+            name: UIResponder.keyboardWillChangeFrameNotification, object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(keyboardWillHide(_:)),
+            name: UIResponder.keyboardWillHideNotification, object: nil
+        )
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        NotificationCenter.default.removeObserver(self, name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
+        NotificationCenter.default.removeObserver(self, name: UIResponder.keyboardWillHideNotification, object: nil)
         autosaveTimer?.invalidate()
         autosaveTimer = nil
         saveNotes(textView.text)
     }
+
+    // MARK: - Migration
+
+    private func migrateFromUserDefaultsIfNeeded() {
+        let legacyKey = "notes.text"
+        guard let legacyText = UserDefaults.standard.string(forKey: legacyKey) else { return }
+        // 只在文件还不存在时迁移（防止覆盖用户在新版写入的内容）
+        guard !FileManager.default.fileExists(atPath: Self.notesFileURL.path) else {
+            UserDefaults.standard.removeObject(forKey: legacyKey)
+            return
+        }
+        saveNotes(legacyText)
+        textView.text = legacyText
+        UserDefaults.standard.removeObject(forKey: legacyKey)
+    }
+
+    // MARK: - Storage（文件系统）
+
+    private func loadNotes() -> String {
+        (try? String(contentsOf: Self.notesFileURL, encoding: .utf8)) ?? ""
+    }
+
+    private func saveNotes(_ text: String) {
+        // 异步写入，不阻塞主线程
+        let url = Self.notesFileURL
+        DispatchQueue.global(qos: .utility).async {
+            try? text.write(to: url, atomically: true, encoding: .utf8)
+        }
+    }
+
+    // MARK: - Keyboard Handling
+
+    @objc private func keyboardWillChangeFrame(_ notification: Notification) {
+        guard
+            let userInfo = notification.userInfo,
+            let keyboardFrame = userInfo[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect,
+            let duration = userInfo[UIResponder.keyboardAnimationDurationUserInfoKey] as? TimeInterval,
+            let curveValue = userInfo[UIResponder.keyboardAnimationCurveUserInfoKey] as? UInt
+        else { return }
+
+        let keyboardTop = keyboardFrame.minY
+        let viewBottom = view.frame.maxY
+        let overlap = max(0, viewBottom - keyboardTop)
+        let safeBottom = view.safeAreaInsets.bottom
+        let offset = max(0, overlap - safeBottom)
+
+        let options = UIView.AnimationOptions(rawValue: curveValue << 16)
+        UIView.animate(withDuration: duration, delay: 0, options: options) {
+            self.textViewBottomConstraint.constant = -offset
+            self.view.layoutIfNeeded()
+        }
+    }
+
+    @objc private func keyboardWillHide(_ notification: Notification) {
+        guard
+            let userInfo = notification.userInfo,
+            let duration = userInfo[UIResponder.keyboardAnimationDurationUserInfoKey] as? TimeInterval,
+            let curveValue = userInfo[UIResponder.keyboardAnimationCurveUserInfoKey] as? UInt
+        else { return }
+
+        let options = UIView.AnimationOptions(rawValue: curveValue << 16)
+        UIView.animate(withDuration: duration, delay: 0, options: options) {
+            self.textViewBottomConstraint.constant = 0
+            self.view.layoutIfNeeded()
+        }
+    }
+
+    // MARK: - UITextViewDelegate
 
     func textViewDidChange(_ textView: UITextView) {
         scheduleAutosave()
@@ -62,13 +162,7 @@ final class NotesViewController: UIViewController, UITextViewDelegate {
         }
     }
 
-    private func loadNotes() -> String {
-        UserDefaults.standard.string(forKey: notesDefaultsKey) ?? ""
-    }
-
-    private func saveNotes(_ text: String) {
-        UserDefaults.standard.set(text, forKey: notesDefaultsKey)
-    }
+    // MARK: - Actions
 
     @objc private func copyNotes() {
         UIPasteboard.general.string = textView.text
@@ -104,29 +198,22 @@ final class NotesViewController: UIViewController, UITextViewDelegate {
             return
         }
         UIPasteboard.general.string = textView.text
-        if let tabBarController = nearestTabBarController() {
-            selectServiceTab(service, in: tabBarController)
-            showToast(message: "Copied — paste to send", in: tabBarController.view)
+        if let tbc = tabBarController {
+            selectServiceTab(service, in: tbc)
+            showToast(message: "Copied — paste to send", in: tbc.view)
         } else {
             showToast(message: "Copied — paste to send", in: view)
         }
     }
 
     private func showEmptyNotesAlert() {
-        let alert = UIAlertController(title: "Notes are empty", message: "Add something to send first.", preferredStyle: .alert)
+        let alert = UIAlertController(
+            title: "Notes are empty",
+            message: "Add something to send first.",
+            preferredStyle: .alert
+        )
         alert.addAction(UIAlertAction(title: "OK", style: .default))
         present(alert, animated: true)
-    }
-
-    private func nearestTabBarController() -> UITabBarController? {
-        var current: UIViewController? = self
-        while let controller = current {
-            if let tabBarController = controller as? UITabBarController {
-                return tabBarController
-            }
-            current = controller.parent
-        }
-        return nil
     }
 
     private func selectServiceTab(_ service: Service, in tabBarController: UITabBarController) {
@@ -177,7 +264,11 @@ final class NotesViewController: UIViewController, UITextViewDelegate {
     }
 
     @objc private func confirmClear() {
-        let alert = UIAlertController(title: "Clear Notes?", message: "This will remove all text.", preferredStyle: .alert)
+        let alert = UIAlertController(
+            title: "Clear Notes?",
+            message: "This will remove all text.",
+            preferredStyle: .alert
+        )
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
         alert.addAction(UIAlertAction(title: "Clear", style: .destructive) { [weak self] _ in
             self?.textView.text = ""
@@ -196,7 +287,9 @@ private final class PaddingLabel: UILabel {
 
     override var intrinsicContentSize: CGSize {
         let size = super.intrinsicContentSize
-        return CGSize(width: size.width + textInsets.left + textInsets.right,
-                      height: size.height + textInsets.top + textInsets.bottom)
+        return CGSize(
+            width: size.width + textInsets.left + textInsets.right,
+            height: size.height + textInsets.top + textInsets.bottom
+        )
     }
-}   
+}
