@@ -1,4 +1,5 @@
 import Foundation
+import WebKit
 
 struct InjectedJavaScript {
     let documentStart: String?
@@ -35,6 +36,16 @@ enum Service: CaseIterable {
             return "globe"
         case .aistudio:
             return "sparkles"
+        }
+    }
+
+    var preferredContentMode: WKWebpagePreferences.ContentMode {
+        switch self {
+        case .aistudio:
+            // AI Studio 仅有桌面版，强制桌面模式渲染
+            return .desktop
+        case .chatgpt:
+            return .mobile
         }
     }
 
@@ -82,7 +93,21 @@ enum Service: CaseIterable {
                 """
             )
         case .aistudio:
-            return nil
+            // AI Studio 桌面版：注入 viewport 让页面缩放适配手机屏幕宽度
+            return InjectedJavaScript(
+                documentStart: nil,
+                documentEnd: """
+                (function() {
+                  var existing = document.querySelector('meta[name="viewport"]');
+                  if (existing) existing.remove();
+                  var meta = document.createElement('meta');
+                  meta.name = 'viewport';
+                  meta.content = 'width=1280, initial-scale=0.33, minimum-scale=0.1, maximum-scale=5.0, user-scalable=yes';
+                  document.head.appendChild(meta);
+                })();
+                """,
+                didFinish: nil
+            )
         }
     }
 

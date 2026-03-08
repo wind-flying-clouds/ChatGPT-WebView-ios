@@ -120,8 +120,13 @@ final class WebContainerViewController: UIViewController, WKNavigationDelegate, 
         newWebView.allowsBackForwardNavigationGestures = true
         newWebView.backgroundColor = .systemBackground
         newWebView.isOpaque = false
-        // 修复顶部与导航栏重叠、底部空白问题
         newWebView.scrollView.contentInsetAdjustmentBehavior = .automatic
+        // 桌面模式（如 AIStudio）开启手势缩放，方便用户查看细节
+        if service.preferredContentMode == .desktop {
+            newWebView.scrollView.minimumZoomScale = 0.1
+            newWebView.scrollView.maximumZoomScale = 5.0
+            newWebView.scrollView.bouncesZoom = true
+        }
         view.insertSubview(newWebView, belowSubview: activityIndicator)
         NSLayoutConstraint.activate([
             newWebView.topAnchor.constraint(equalTo: view.topAnchor),
@@ -143,7 +148,7 @@ final class WebContainerViewController: UIViewController, WKNavigationDelegate, 
 
         let prefs = WKWebpagePreferences()
         prefs.allowsContentJavaScript = true
-        prefs.preferredContentMode = .mobile
+        prefs.preferredContentMode = service.preferredContentMode
         config.defaultWebpagePreferences = prefs
 
         let userContentController = WKUserContentController()
