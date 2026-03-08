@@ -1,52 +1,24 @@
 import UIKit
 import WebKit
 
-/// 集中管理 App 的磁盘写入行为
-///
-/// # 优化清单（相对原版）
-///
-/// ## [Fix-1] Service Worker 缓存遗漏
-///   原版 cacheOnlyDataTypes 只清理 DiskCache + OfflineWebApplicationCache，
-///   遗漏了 ServiceWorkerRegistrations。ChatGPT 大量依赖 Service Worker 做
-///   离线缓存和推送，不清理会导致旧版 SW 脚本堆积（每次发版都产生新 SW 文件）。
-///
-/// ## [Fix-2] Mirror 私有 API 替换
-///   原版 iOS 17+ 路径用 Mirror 反射私有属性 `dataSize`，极其脆弱：
-///   任何 SDK patch 都可能让 label 改名导致永远返回 1MB 估算值。
-///   改用 WKWebsiteDataStore 的公开 fetchDataRecords + URLStorageSize API
-///   （iOS 17+ 可用），不可用时回退到保守估算。
-///
-/// ## [Fix-3] 防抖动 / 重入保护
-///   原版 checkAndTrimIfNeeded 在每次进入前台时直接发起异步 fetch，
-///   快速切换前后台会产生多个并发 fetch + clear 调用。
-///   新版加入 `isTrimming` 标志位 + 最短检查间隔（30 分钟），防止重复触发。
-///
-/// ## [Fix-4] 阈值调整 250MB → 150MB
-///   250MB 是 ChatGPT + AIStudio 各自完整 JS bundle 的总和估算，
-///   但 Service Worker 脚本 + 图片缓存还会额外叠加。
-///   调整为 150MB 可更及时释放空间，同时对正常使用体验无感知影响。
-
 final class StorageManager {
 
     static let shared = StorageManager()
 
-    /// 自动清理阈值：150MB（见 Fix-4）
+    /// 自动清理阈值：150MB
     private let autoClearThresholdBytes: Int64 = 150 * 1024 * 1024
 
-    /// [Fix-1] 增加 ServiceWorkerRegistrations，覆盖 ChatGPT SW 缓存
+    /// [Fix-1] 增加 ServiceWorkerRegistrations + MemoryCache，覆盖更多缓存类型
+    /// WKWebsiteDataTypeFetchCache 不是公开常量，已移除
     private let cacheOnlyDataTypes: Set<String> = {
         var types: Set<String> = [
             WKWebsiteDataTypeDiskCache,
-            WKWebsiteDataTypeOfflineWebApplicationCache
+            WKWebsiteDataTypeOfflineWebApplicationCache,
+            WKWebsiteDataTypeMemoryCache
         ]
-        // Service Worker 在 iOS 14+ 支持
         if #available(iOS 14.0, *) {
             types.insert(WKWebsiteDataTypeServiceWorkerRegistrations)
         }
-        // 内存缓存（进程内，重启自然释放，但显式清理可立即见效）
-        types.insert(WKWebsiteDataTypeMemoryCache)
-        // 已获取资源（fetch cache）
-        types.insert(WKWebsiteDataTypeFetchCache)
         return types
     }()
 
@@ -56,7 +28,7 @@ final class StorageManager {
     /// [Fix-3] 上次检查时间戳，限制最小检查间隔
     private var lastCheckDate: Date?
 
-    /// 最短检查间隔：30 分钟（进入前台频繁切换时不反复触发）
+    /// 最短检查间隔：30 分钟
     private let minimumCheckInterval: TimeInterval = 30 * 60
 
     private init() {}
@@ -64,10 +36,8 @@ final class StorageManager {
     // MARK: - 前台检查入口（由 SceneDelegate 调用）
 
     func checkAndTrimIfNeeded() {
-        // [Fix-3] 重入保护
         guard !isTrimming else { return }
 
-        // [Fix-3] 最小间隔保护
         if let last = lastCheckDate, Date().timeIntervalSince(last) < minimumCheckInterval {
             return
         }
@@ -92,22 +62,14 @@ final class StorageManager {
         let types = WKWebsiteDataStore.allWebsiteDataTypes()
 
         dataStore.fetchDataRecords(ofTypes: types) { records in
-            // [Fix-2] 不再使用 Mirror 反射私有属性
-            // iOS 17+ WKWebsiteDataRecord 有公开的 dataSize (UInt64?)
-            // iOS 16 及以下：按记录类型加权估算
-            let total: Int64
-            if #available(iOS 17.0, *) {
-                total = records.reduce(Int64(0)) { sum, record in
-                    // dataSize 在 iOS 17 公开（Swift overlay 属性，非私有）
-                    sum + Int64(record.dataSize ?? 0)
-                }
-            } else {
-                // 加权估算：磁盘缓存 ~5MB/条，其他类型 ~0.5MB/条
-                total = records.reduce(Int64(0)) { sum, record in
-                    let hasDisk = record.dataTypes.contains(WKWebsiteDataTypeDiskCache)
-                    let weight: Int64 = hasDisk ? 5 * 1024 * 1024 : 512 * 1024
-                    return sum + weight
-                }
+            // [Fix-2] WKWebsiteDataRecord 没有公开 size 属性（Mirror 反射也脆弱）。
+            // 改用按数据类型加权估算：
+            //   含 DiskCache 的记录体积大 → 保守估 ~5MB/条
+            //   其余（SW、LocalStorage 等） → 估 ~0.5MB/条
+            let total = records.reduce(Int64(0)) { sum, record in
+                let hasDisk = record.dataTypes.contains(WKWebsiteDataTypeDiskCache)
+                let weight: Int64 = hasDisk ? 5 * 1024 * 1024 : 512 * 1024
+                return sum + weight
             }
             DispatchQueue.main.async { completion(total) }
         }
