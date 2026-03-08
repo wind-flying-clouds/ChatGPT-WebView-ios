@@ -20,7 +20,7 @@ enum Service: CaseIterable {
         case .aistudio:
             return URL(string: "https://aistudio.google.com/prompts/new_chat")!
         case .claude:
-            return URL(string: "https://claude.ai/new")!
+            return URL(string: "https://claude.ai/")!
         case .grok:
             return URL(string: "https://grok.com/")!
         }
@@ -42,13 +42,13 @@ enum Service: CaseIterable {
     var tabIconSystemName: String {
         switch self {
         case .chatgpt:
-            return "brain"
+            return "globe"
         case .aistudio:
             return "sparkles"
         case .claude:
-            return "quill"
+            return "pencil"
         case .grok:
-            return "bolt.fill"
+            return "bolt.horizontal.circle"
         }
     }
 
