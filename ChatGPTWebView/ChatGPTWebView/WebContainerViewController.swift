@@ -110,17 +110,25 @@ final class WebContainerViewController: UIViewController, WKNavigationDelegate, 
             return
         }
         let config = makeConfiguration()
-        let newWebView = WKWebView(frame: view.bounds, configuration: config)
+        let newWebView = WKWebView(frame: .zero, configuration: config)
         if let userAgent = service.userAgentOverride {
             newWebView.customUserAgent = userAgent
         }
-        newWebView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        newWebView.translatesAutoresizingMaskIntoConstraints = false
         newWebView.navigationDelegate = self
         newWebView.uiDelegate = self
         newWebView.allowsBackForwardNavigationGestures = true
         newWebView.backgroundColor = .systemBackground
         newWebView.isOpaque = false
+        // 修复顶部与导航栏重叠、底部空白问题
+        newWebView.scrollView.contentInsetAdjustmentBehavior = .automatic
         view.insertSubview(newWebView, belowSubview: activityIndicator)
+        NSLayoutConstraint.activate([
+            newWebView.topAnchor.constraint(equalTo: view.topAnchor),
+            newWebView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            newWebView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            newWebView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        ])
         webView = newWebView
         loadLastURLIfNeeded()
     }
