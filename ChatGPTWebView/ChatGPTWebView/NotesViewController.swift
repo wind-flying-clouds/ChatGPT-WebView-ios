@@ -4,9 +4,9 @@ final class NotesViewController: UIViewController, UITextViewDelegate {
     private let textView = UITextView()
     private var autosaveTimer: Timer?
 
-    // 优化D：Notes 从 UserDefaults 迁移到文件系统
+    // Notes 从 UserDefaults 迁移到文件系统
     // UserDefaults 设计用于存储少量键值偏好（通常 < 100KB），
-    // 大段笔记写入会导致整个 UserDefaults plist 序列化/反序列化，拖慢启动时间。
+    // 大段笔记写入会导致整个 plist 序列化/反序列化，拖慢启动时间。
     // 使用 Documents/notes.txt 后，读写是独立 I/O，不影响 App 其他偏好数据。
     private static let notesFileURL: URL = {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -14,6 +14,10 @@ final class NotesViewController: UIViewController, UITextViewDelegate {
     }()
 
     private var textViewBottomConstraint: NSLayoutConstraint!
+
+    // [Fix-键盘] 记录上次保存的文本内容，只在内容真正变化时才写磁盘，
+    // 避免 viewWillDisappear 时无意义的重复 I/O。
+    private var lastSavedText: String = ""
 
     init() {
         super.init(nibName: nil, bundle: nil)
@@ -39,11 +43,28 @@ final class NotesViewController: UIViewController, UITextViewDelegate {
             title: "Clear", style: .plain, target: self, action: #selector(confirmClear)
         )
 
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // [Fix-键盘] 为键盘添加 inputAccessoryView（工具栏），
+        // 提供"完成"按钮让用户随时能收起键盘。
+        //
+        // 问题根因：UITextView 铺满整个 view，没有可点击的空白区域触发
+        // resignFirstResponder()，且导航栏按钮都是功能性按钮，没有"收键盘"入口。
+        //
+        // inputAccessoryView 是 Apple 推荐方案：
+        //   · 随键盘动画同步出现/消失，无需手动处理 frame
+        //   · 不占用 textView 内部空间
+        //   · 与第三方输入法（含拼音/五笔）完全兼容
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        textView.inputAccessoryView = makeKeyboardToolbar()
+
         textView.translatesAutoresizingMaskIntoConstraints = false
         textView.delegate = self
         textView.font = UIFont.preferredFont(forTextStyle: .body)
         textView.backgroundColor = .clear
-        textView.text = loadNotes()
+
+        let savedText = loadNotes()
+        textView.text = savedText
+        lastSavedText = savedText   // 初始化基准，避免首次 viewWillDisappear 触发无效写入
 
         view.addSubview(textView)
 
@@ -57,7 +78,6 @@ final class NotesViewController: UIViewController, UITextViewDelegate {
             textViewBottomConstraint
         ])
 
-        // 优化D：若旧数据在 UserDefaults，一次性迁移到文件，然后删除 UserDefaults 条目
         migrateFromUserDefaultsIfNeeded()
     }
 
@@ -75,11 +95,42 @@ final class NotesViewController: UIViewController, UITextViewDelegate {
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+
+        // [Fix-键盘] 切换 Tab 时顺带收键盘，避免键盘状态残留影响其他 Tab
+        textView.resignFirstResponder()
+
         NotificationCenter.default.removeObserver(self, name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
         NotificationCenter.default.removeObserver(self, name: UIResponder.keyboardWillHideNotification, object: nil)
         autosaveTimer?.invalidate()
         autosaveTimer = nil
-        saveNotes(textView.text)
+
+        // [Fix-磁盘] 只在内容真正改变时才落盘，避免无效 I/O
+        let current = textView.text ?? ""
+        if current != lastSavedText {
+            saveNotes(current)
+        }
+    }
+
+    // [Fix-安全] deinit 兜底移除观察者，
+    // 防止 viewWillDisappear 未被调用（如 VC 被直接释放）时泄露 observer。
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    // MARK: - Keyboard Toolbar
+
+    private func makeKeyboardToolbar() -> UIToolbar {
+        let toolbar = UIToolbar(frame: CGRect(x: 0, y: 0, width: UIScreen.main.bounds.width, height: 44))
+        toolbar.sizeToFit()
+        let spacer = UIBarButtonItem(barButtonSystemItem: .flexibleSpace, target: nil, action: nil)
+        let doneButton = UIBarButtonItem(title: "完成", style: .done, target: self, action: #selector(dismissKeyboard))
+        toolbar.items = [spacer, doneButton]
+        toolbar.tintColor = .systemBlue
+        return toolbar
+    }
+
+    @objc private func dismissKeyboard() {
+        textView.resignFirstResponder()
     }
 
     // MARK: - Migration
@@ -87,13 +138,13 @@ final class NotesViewController: UIViewController, UITextViewDelegate {
     private func migrateFromUserDefaultsIfNeeded() {
         let legacyKey = "notes.text"
         guard let legacyText = UserDefaults.standard.string(forKey: legacyKey) else { return }
-        // 只在文件还不存在时迁移（防止覆盖用户在新版写入的内容）
         guard !FileManager.default.fileExists(atPath: Self.notesFileURL.path) else {
             UserDefaults.standard.removeObject(forKey: legacyKey)
             return
         }
         saveNotes(legacyText)
         textView.text = legacyText
+        lastSavedText = legacyText
         UserDefaults.standard.removeObject(forKey: legacyKey)
     }
 
@@ -104,8 +155,9 @@ final class NotesViewController: UIViewController, UITextViewDelegate {
     }
 
     private func saveNotes(_ text: String) {
-        // 异步写入，不阻塞主线程
+        lastSavedText = text    // 同步更新基准，防止 viewWillDisappear 再次写入
         let url = Self.notesFileURL
+        // 异步写入，不阻塞主线程
         DispatchQueue.global(qos: .utility).async {
             try? text.write(to: url, atomically: true, encoding: .utf8)
         }
@@ -156,9 +208,15 @@ final class NotesViewController: UIViewController, UITextViewDelegate {
 
     private func scheduleAutosave() {
         autosaveTimer?.invalidate()
-        autosaveTimer = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: false) { [weak self] _ in
+        // [Fix-磁盘] 将自动保存间隔从 0.6s 增加到 2.0s。
+        // 原来 0.6s：中文输入（每字约 2~4 次按键），10 秒内可能触发 15+ 次写磁盘。
+        // 改为 2.0s：同等场景磁盘写入降低约 70%，对 notes.txt 单文件场景完全够用。
+        autosaveTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { [weak self] _ in
             guard let self else { return }
-            self.saveNotes(self.textView.text)
+            let current = self.textView.text ?? ""
+            // 二次确认内容确实有变化再落盘（防止定时器触发时恰好未变）
+            guard current != self.lastSavedText else { return }
+            self.saveNotes(current)
         }
     }
 
